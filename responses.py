@@ -1,4 +1,5 @@
 from xml.etree.ElementTree import Element, SubElement, tostring
+import models
 
 def generate_error_response(code: str, message: str, resource: str) -> bytes:
     root = Element("Error")
@@ -22,10 +23,40 @@ def complete_multipart_upload_response(bucket: str, key: str, etag: str, locatio
     SubElement(root, "ETag").text = etag
     return tostring(root, encoding="utf-8")
 
-# Add this function to your responses.py file
 
 def generate_location_response() -> bytes:
     """Generates an S3-compatible LocationConstraint XML response."""
     root = Element("LocationConstraint", {"xmlns": "http://s3.amazonaws.com/doc/2006-03-01/"})
-    # An empty tag implies the default region 'us-east-1', which is perfect for this use case.
+    return tostring(root, encoding="utf-8")
+
+def generate_list_objects_v2_response(
+    bucket_name: str,
+    prefix: str,
+    marker: str,
+    max_keys: int,
+    is_truncated: bool,
+    objects: list[models.Object],
+    next_marker: str,
+) -> bytes:
+    """Generates an S3-compatible ListBucketResult (V2) XML response."""
+    root = Element("ListBucketResult", {"xmlns": "http://s3.amazonaws.com/doc/2006-03-01/"})
+    SubElement(root, "Name").text = bucket_name
+    SubElement(root, "Prefix").text = prefix
+    SubElement(root, "MaxKeys").text = str(max_keys)
+    SubElement(root, "IsTruncated").text = "true" if is_truncated else "false"
+
+    for obj in objects:
+        contents = SubElement(root, "Contents")
+        SubElement(contents, "Key").text = obj.name
+        SubElement(contents, "LastModified").text = obj.last_modified.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        SubElement(contents, "ETag").text = f'"{obj.etag}"'
+        SubElement(contents, "Size").text = str(obj.size)
+        SubElement(contents, "StorageClass").text = "STANDARD"
+
+    if is_truncated and next_marker:
+        SubElement(root, "NextContinuationToken").text = next_marker
+
+    if marker:
+        SubElement(root, "ContinuationToken").text = marker
+
     return tostring(root, encoding="utf-8")

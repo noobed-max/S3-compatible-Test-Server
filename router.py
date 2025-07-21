@@ -12,6 +12,7 @@ from responses import (
     initiate_multipart_upload_response,
     complete_multipart_upload_response,
     generate_location_response,
+    generate_list_objects_v2_response,
 )
 
 router = APIRouter()
@@ -29,21 +30,46 @@ def get_bucket(
     Differentiates between GetBucketLocation and ListObjects based on query params.
     """
     # Check if this is a GetBucketLocation request
-    if "location" in request.query_params:
-        bucket = crud.get_bucket_by_name(db, name=bucket_name)
-        if not bucket or bucket.owner_id != current_user.id:
-            error_xml = generate_error_response("NoSuchBucket", "The specified bucket does not exist.", f"/{bucket_name}")
-            return Response(content=error_xml, media_type="application/xml", status_code=404)
+    bucket = crud.get_bucket_by_name(db, name=bucket_name)
+    if not bucket or bucket.owner_id != current_user.id:
+        error_xml = generate_error_response("NoSuchBucket", "The specified bucket does not exist.", f"/{bucket_name}")
+        return Response(content=error_xml, media_type="application/xml", status_code=404)
 
-        # Return the location XML
+    # Handle GetBucketLocation
+    if "location" in request.query_params:
         xml_response = generate_location_response()
         return Response(content=xml_response, media_type="application/xml")
 
-    # If other query params for listing objects are present, they would be handled here.
-    # For now, we'll say it's not implemented for anything else.
-    raise HTTPException(
-        status_code=501, 
-        detail="This bucket GET operation is not implemented."
+    # Handle ListObjectsV2
+    if "list-type" in request.query_params and request.query_params["list-type"] == "2":
+        prefix = request.query_params.get("prefix", "")
+        max_keys = int(request.query_params.get("max-keys", 1000))
+        continuation_token = request.query_params.get("continuation-token")
+
+        objects, is_truncated, next_token = crud.list_objects(
+            db,
+            bucket_id=bucket.id,
+            prefix=prefix,
+            marker=continuation_token,
+            limit=max_keys,
+        )
+
+        xml_response = generate_list_objects_v2_response(
+            bucket_name=bucket.name,
+            prefix=prefix,
+            marker=continuation_token,
+            max_keys=max_keys,
+            is_truncated=is_truncated,
+            objects=objects,
+            next_marker=next_token,
+        )
+        return Response(content=xml_response, media_type="application/xml")
+
+    # Fallback for other unimplemented GET bucket operations
+    return Response(
+        content=generate_error_response("NotImplemented", "The requested bucket operation is not implemented.", f"/{bucket_name}"),
+        media_type="application/xml",
+        status_code=501
     )
 
 

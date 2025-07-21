@@ -2,7 +2,7 @@ import hashlib
 import hmac
 from datetime import datetime
 from typing import Mapping, Union, List, Tuple
-from urllib.parse import unquote, parse_qsl
+from urllib.parse import quote, parse_qsl
 
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -20,14 +20,11 @@ def _get_canonical_headers(headers: Mapping[str, str]) -> tuple[str, str]:
 
 def _get_canonical_request(request: Request, signed_headers: str, payload_hash: str) -> str:
     method = request.method
-    path = unquote(request.url.path)
-    query_params = parse_qsl(request.url.query, keep_blank_values=True)
+    path = request.scope['raw_path'].decode()
+    query_params = sorted(parse_qsl(request.url.query, keep_blank_values=True))
     
     # Sort the query parameters by key
-    query_params.sort(key=lambda x: x[0])
-    
-    # Reconstruct the canonical query string. Example: 'uploads='
-    query = "&".join([f"{k}={v}" for k, v in query_params])
+    query = "&".join([f"{quote(k, safe='-_.~')}={quote(v, safe='-_.~')}" for k, v in query_params])
     
     # Extract only signed headers for the canonical request
     canonical_headers_dict = {

@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 import models
-
+from sqlalchemy import asc
 def get_user_by_access_key(db: Session, access_key: str):
     return db.query(models.User).filter(models.User.access_key == access_key).first()
 
@@ -13,7 +13,28 @@ def get_object_by_bucket_and_name(db: Session, bucket_id: int, name: str):
         models.Object.bucket_id == bucket_id,
         models.Object.name == name
     ).first()
-
+def list_objects(db: Session, bucket_id: int, prefix: str, marker: str, limit: int):
+    """Lists objects in a bucket with pagination."""
+    query = db.query(models.Object).filter(models.Object.bucket_id == bucket_id)
+    
+    if prefix:
+        query = query.filter(models.Object.name.startswith(prefix))
+        
+    if marker:
+        query = query.filter(models.Object.name > marker)
+        
+    objects = query.order_by(asc(models.Object.name)).limit(limit + 1).all()
+    
+    is_truncated = len(objects) > limit
+    next_marker = None
+    
+    if is_truncated:
+        # The last object is the marker for the next page
+        next_marker = objects[limit - 1].name
+        # Return only the requested number of objects
+        objects = objects[:limit]
+        
+    return objects, is_truncated, next_marker
 def create_bucket(db: Session, name: str, owner_id: int):
     db_bucket = models.Bucket(name=name, owner_id=owner_id)
     db.add(db_bucket)
