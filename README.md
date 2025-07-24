@@ -29,7 +29,7 @@ Follow these steps to get the server running locally.
 ### 2\. Clone the Repository
 
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/noobed-max/S3-compatible-test-object_storage
 cd S3-compatible-fastapiServerTest
 ```
 
