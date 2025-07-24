@@ -78,3 +78,16 @@ def delete_multipart_upload(db: Session, upload_id: str):
     if upload:
         db.delete(upload)
         db.commit()
+
+def delete_object(db: Session, object_id: int):
+    """Deletes an object record from the database by its ID."""
+    db_object = db.query(models.Object).filter(models.Object.id == object_id).first()
+    if db_object:
+        db.delete(db_object)
+        db.commit()
+def delete_bucket(db: Session, bucket_id: int):
+    """Deletes a bucket record from the database by its ID."""
+    db_bucket = db.query(models.Bucket).filter(models.Bucket.id == bucket_id).first()
+    if db_bucket:
+        db.delete(db_bucket)
+        db.commit()

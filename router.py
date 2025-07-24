@@ -1,6 +1,7 @@
 import uuid
 import xml.etree.ElementTree as ET
-from fastapi import APIRouter, Depends, Request, Response, HTTPException
+from fastapi import APIRouter, Depends, Request, Response, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from auth import get_current_user
 from database import get_db
@@ -14,6 +15,7 @@ from responses import (
     generate_location_response,
     generate_list_objects_v2_response,
 )
+import os
 
 router = APIRouter()
 
@@ -29,7 +31,6 @@ def get_bucket(
     Handles GET requests on a bucket.
     Differentiates between GetBucketLocation and ListObjects based on query params.
     """
-    # Check if this is a GetBucketLocation request
     bucket = crud.get_bucket_by_name(db, name=bucket_name)
     if not bucket or bucket.owner_id != current_user.id:
         error_xml = generate_error_response("NoSuchBucket", "The specified bucket does not exist.", f"/{bucket_name}")
@@ -92,6 +93,49 @@ def create_bucket(bucket_name: str, db: Session = Depends(get_db), current_user:
     storage.create_bucket_folder(bucket_name)
     return Response(status_code=200)
 
+@router.get("/{bucket_name}/{object_name:path}/")
+@router.get("/{bucket_name}/{object_name:path}")
+def get_object(
+    bucket_name: str,
+    object_name: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Handles GET requests to retrieve an object.
+    This is used by clients like Minio's fget_object.
+    """
+    # 1. Verify the bucket exists and the user owns it
+    bucket = crud.get_bucket_by_name(db, name=bucket_name)
+    if not bucket or bucket.owner_id != current_user.id:
+        error_xml = generate_error_response(
+            "NoSuchBucket", "The specified bucket does not exist.", f"/{bucket_name}"
+        )
+        return Response(content=error_xml, media_type="application/xml", status_code=404)
+
+    # 2. Retrieve the object's metadata from the database
+    db_object = crud.get_object_by_bucket_and_name(db, bucket_id=bucket.id, name=object_name)
+    if not db_object:
+        error_xml = generate_error_response(
+            "NoSuchKey", "The specified key does not exist.", f"/{bucket_name}/{object_name}"
+        )
+        return Response(content=error_xml, media_type="application/xml", status_code=404)
+
+    # 3. Set S3-compatible headers for the response
+    headers = {
+        "ETag": f'"{db_object.etag}"',
+        "Last-Modified": db_object.last_modified.strftime("%a, %d %b %Y %H:%M:%S GMT"),
+        "Content-Length": str(db_object.size),
+        "Content-Type": db_object.content_type,
+    }
+
+    # 4. Stream the file from storage using FileResponse
+    return FileResponse(
+        path=db_object.filepath,
+        headers=headers,
+        media_type=db_object.content_type
+    )
+
 @router.head("/{bucket_name}/{object_name:path}")
 def head_object(
     bucket_name: str,
@@ -117,7 +161,13 @@ def head_object(
     return Response(status_code=200, headers=headers)
 
 @router.post("/{bucket_name}/{object_name:path}")
-async def multipart_actions(bucket_name: str, object_name: str, request: Request, db: Session = Depends(get_db), current_user: models.User = Depends(get_current_user)):
+async def multipart_actions(
+    bucket_name: str, 
+    object_name: str, 
+    request: Request, 
+    db: Session = Depends(get_db), 
+    current_user: models.User = Depends(get_current_user)
+    ):
     if "uploads" in request.query_params:
         # Initiate Multipart Upload
         upload_id = str(uuid.uuid4())
@@ -188,24 +238,106 @@ async def put_object(bucket_name: str, object_name: str, request: Request, db: S
     crud.create_object(db, bucket_id=bucket.id, name=object_name, size=size, etag=etag, filepath=str(storage.STORAGE_ROOT / bucket_name / object_name), content_type=content_type)
     
     return Response(headers={"ETag": f'"{etag}"'})
-@router.delete("/{bucket_name}/{object_name:path}")
-def abort_multipart_upload(
+
+@router.delete("/{bucket_name}/")
+@router.delete("/{bucket_name}")
+def remove_bucket(
     bucket_name: str,
-    object_name: str,
-    uploadId: str, # FastAPI gets query params by name
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
-    """Handles aborting a multipart upload."""
-    upload = crud.get_multipart_upload(db, uploadId)
-    if not upload or upload.bucket_name != bucket_name or upload.object_name != object_name:
-        raise HTTPException(status_code=404, detail="The specified multipart upload does not exist.")
+    """
+    Handles bucket deletion requests.
+    A bucket can only be deleted if it is empty.
+    """
+    # 1. Verify the bucket exists and the user owns it.
+    bucket = crud.get_bucket_by_name(db, name=bucket_name)
+    if not bucket or bucket.owner_id != current_user.id:
+        error_xml = generate_error_response(
+            "NoSuchBucket", "The specified bucket does not exist.", f"/{bucket_name}"
+        )
+        return Response(content=error_xml, media_type="application/xml", status_code=404)
 
-    # 1. Clean up stored part files from the disk
-    storage.cleanup_parts(uploadId)
+    # 2. S3 Spec: Check if the bucket is empty before deletion.
+    # The back-populated 'objects' relationship on the Bucket model makes this easy.
+    if bucket.objects:
+        error_xml = generate_error_response(
+            "BucketNotEmpty", "The bucket you tried to delete is not empty.", f"/{bucket_name}"
+        )
+        return Response(content=error_xml, media_type="application/xml", status_code=409)
+
+    # 3. Delete the physical bucket folder from storage.
+    try:
+        storage.delete_bucket_folder(bucket.name)
+    except Exception as e:
+        print(f"Error deleting bucket folder {bucket.name}: {e}")
+        error_xml = generate_error_response(
+            "InternalError", "We encountered an internal error trying to delete the bucket folder.", f"/{bucket_name}"
+        )
+        return Response(content=error_xml, media_type="application/xml", status_code=500)
+
+    # 4. Delete the bucket record from the database.
+    crud.delete_bucket(db, bucket_id=bucket.id)
+
+    # 5. Return success (204 No Content).
+    return Response(status_code=204)
+
     
-    # 2. Delete the upload record from the database
-    crud.delete_multipart_upload(db, uploadId)
+@router.delete("/{bucket_name}/{object_name:path}")
+def handle_object_delete(
+    bucket_name: str,
+    object_name: str,
+    uploadId: str | None = Query(default=None), # Capture the optional 'uploadId' query param
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
+):
+    """
+    Handles DELETE requests for objects. Differentiates between:
+    1. Abort Multipart Upload (if 'uploadId' query param is present).
+    2. Remove Object (if no 'uploadId' is present).
+    """
+    # Common logic: Verify the bucket exists and the user owns it.
+    bucket = crud.get_bucket_by_name(db, name=bucket_name)
+    if not bucket or bucket.owner_id != current_user.id:
+        error_xml = generate_error_response(
+            "NoSuchBucket", "The specified bucket does not exist.", f"/{bucket_name}"
+        )
+        return Response(content=error_xml, media_type="application/xml", status_code=404)
 
-    # 3. Return the correct success response
-    return Response(status_code=204) # 204 No Content
+    # --- Action Dispatcher ---
+    if uploadId:
+        # === Abort Multipart Upload Logic ===
+        upload = crud.get_multipart_upload(db, uploadId)
+        if not upload or upload.bucket_name != bucket_name or upload.object_name != object_name:
+            error_xml = generate_error_response(
+                "NoSuchUpload",
+                "The specified multipart upload does not exist.",
+                f"/{bucket_name}/{object_name}?uploadId={uploadId}"
+            )
+            return Response(content=error_xml, media_type="application/xml", status_code=404)
+
+        # 1. Clean up stored part files from the disk
+        storage.cleanup_parts(uploadId)
+        
+        # 2. Delete the upload record from the database
+        crud.delete_multipart_upload(db, uploadId)
+
+        # 3. Return the correct success response
+        return Response(status_code=204)
+    else:
+        # === Remove Object Logic ===
+        db_object = crud.get_object_by_bucket_and_name(db, bucket_id=bucket.id, name=object_name)
+
+        if db_object:
+            try:
+                storage.delete_object(db_object.filepath)
+                crud.delete_object(db, object_id=db_object.id)
+            except Exception as e:
+                print(f"Error during object deletion {db_object.filepath}: {e}")
+                error_xml = generate_error_response(
+                    "InternalError", "We encountered an internal error. Please try again.", f"/{bucket_name}/{object_name}"
+                )
+                return Response(content=error_xml, media_type="application/xml", status_code=500)
+
+        # S3's DELETE is idempotent: return success even if object doesn't exist.
+        return Response(status_code=204)

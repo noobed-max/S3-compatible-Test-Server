@@ -4,6 +4,7 @@ from pathlib import Path
 import shutil
 STORAGE_ROOT = Path("s3_storage")
 STORAGE_ROOT.mkdir(exist_ok=True)
+import shutil
 
 def create_bucket_folder(bucket_name: str):
     (STORAGE_ROOT / bucket_name).mkdir(exist_ok=True)
@@ -61,3 +62,24 @@ def cleanup_parts(upload_id: str):
     part_dir = STORAGE_ROOT / ".tmp" / upload_id
     if part_dir.exists():
         shutil.rmtree(part_dir)
+
+def delete_object(filepath: str):
+    """Deletes the physical object file from the storage."""
+    try:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+    except OSError as e:
+        # Log the error and re-raise to be handled by the router
+        print(f"Error deleting file {filepath}: {e}")
+        raise
+
+
+def delete_bucket_folder(bucket_name: str):
+    """Deletes the physical bucket folder and all its contents from storage."""
+    bucket_path = STORAGE_ROOT / bucket_name
+    if bucket_path.exists() and bucket_path.is_dir():
+        try:
+            shutil.rmtree(bucket_path)
+        except OSError as e:
+            print(f"Error removing bucket folder {bucket_path}: {e}")
+            raise
